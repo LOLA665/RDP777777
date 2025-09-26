@@ -1,0 +1,123 @@
+name: Persistent Windows Server RDP 72h
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp-server:
+    runs-on: windows-2022
+    timeout-minutes: 4320  # 72h
+
+    steps:
+      - name: Enable RDP + Firewall
+        shell: pwsh
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0 -Force
+          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
+          Restart-Service -Name TermService -Force
+
+      - name: Reset runneradmin password
+        shell: pwsh
+        run: |
+          function GenPass { -join ((33..126) | Get-Random -Count 14 | % {[char]$_}) }
+          $newPass = GenPass
+          $secure = ConvertTo-SecureString $newPass -AsPlainText -Force
+          Set-LocalUser -Name "runneradmin" -Password $secure
+          Write-Output "RUNNERADMIN_PASS=$newPass" >> $env:GITHUB_ENV
+
+      - name: Install Tailscale
+        shell: pwsh
+        run: |
+          $tsInstaller = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $tsInstaller
+          Start-Process msiexec.exe -ArgumentList "/i `"$tsInstaller`" /quiet /norestart" -Wait
+          Remove-Item $tsInstaller -Force
+
+      - name: Start Tailscale with Auth Key
+        shell: pwsh
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          $authKey = $env:TAILSCALE_AUTH_KEY
+          $host = "gh-server-$env:GITHUB_RUN_ID"
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$authKey --hostname=$host --accept-routes --accept-dns
+          Start-Sleep -Seconds 5
+          $ip = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          Write-Output "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
+
+      - name: Create Boot Script + Scheduled Tasks
+        shell: pwsh
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          $scriptPath = "C:\re_enable_rdp_tailscale.ps1"
+          $authKey = $env:TAILSCALE_AUTH_KEY
+          $host = "gh-server-$env:GITHUB_RUN_ID"
+
+          $content = @"
+Try {
+    Add-Content -Path C:\rdp_status.log -Value '[BOOT] Re-enable script running'
+
+    if ((Get-Service TermService).Status -ne 'Running') {
+        Restart-Service TermService -Force -ErrorAction Stop
+        Add-Content -Path C:\rdp_status.log -Value '[BOOT] RDP service restarted'
+    } else {
+        Add-Content -Path C:\rdp_status.log -Value '[BOOT] RDP service already running'
+    }
+
+    if (Test-Path '$env:ProgramFiles\Tailscale\tailscale.exe') {
+        Try {
+            & '$env:ProgramFiles\Tailscale\tailscale.exe' up --authkey=$authKey --hostname=$host --accept-routes --accept-dns
+            Start-Sleep -Seconds 5
+            $ip = & '$env:ProgramFiles\Tailscale\tailscale.exe' ip -4
+            Add-Content -Path C:\rdp_status.log -Value "[BOOT] Tailscale IP: $ip"
+        } Catch {
+            Add-Content -Path C:\rdp_status.log -Value "[BOOT ERROR] Tailscale failed: $_"
+        }
+    } else {
+        Add-Content -Path C:\rdp_status.log -Value '[BOOT] Tailscale not installed'
+    }
+
+} Catch {
+    Add-Content -Path C:\rdp_status.log -Value "[BOOT ERROR] $_"
+}
+"@
+
+          $content | Out-File -FilePath $scriptPath -Encoding UTF8 -Force
+
+          schtasks /Create /TN "ReEnableRDP_Tailscale_ONSTART" /TR "powershell.exe -ExecutionPolicy Bypass -File `"$scriptPath`"" /SC ONSTART /RL HIGHEST /F
+          schtasks /Create /TN "ReEnableRDP_Tailscale_ONLOGON" /TR "powershell.exe -ExecutionPolicy Bypass -File `"$scriptPath`"" /SC ONLOGON /RL HIGHEST /F
+
+      - name: Show Access Info
+        shell: pwsh
+        run: |
+          $runnerPass = $env:RUNNERADMIN_PASS
+          $ip = $env:TAILSCALE_IP
+          Write-Host "=== ACCESS INFO ==="
+          Write-Host "User: runneradmin"
+          Write-Host "Pass: $runnerPass"
+          Write-Host "Tailscale IP: $ip"
+          Write-Host "=================="
+
+      - name: Keep RDP alive 72h
+        shell: pwsh
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          $authKey = $env:TAILSCALE_AUTH_KEY
+          $host = "gh-server-$env:GITHUB_RUN_ID"
+          $endTime = (Get-Date).AddHours(72)
+          while ((Get-Date) -lt $endTime) {
+            if ((Get-Service TermService).Status -ne 'Running') { Restart-Service TermService -Force }
+            if (Test-Path "$env:ProgramFiles\Tailscale\tailscale.exe") {
+              $ip = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              if ([string]::IsNullOrEmpty($ip)) {
+                & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$authKey --hostname=$host --accept-routes --accept-dns
+              }
+            }
+            Start-Sleep -Seconds 30
+          }
+          
