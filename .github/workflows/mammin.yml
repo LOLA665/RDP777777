@@ -1,0 +1,62 @@
+name: Create Windows Server VM + Tailscale + Show Access + Keep Alive
+
+on:
+  workflow_dispatch:
+
+jobs:
+  create-vm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 370  # 6 ore + buffer
+
+    steps:
+      - name: Authenticate Google Cloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          service_account_key: ${{ secrets.GOOGLE_CREDENTIALS }}
+          project_id: your-google-cloud-project-id
+          export_default_credentials: true
+
+      - name: Set zone and machine type
+        run: |
+          gcloud config set compute/zone us-central1-a
+          export MACHINE_TYPE="custom-8-32768"
+
+      - name: Create 600GB SSD disk
+        run: |
+          gcloud compute disks create windows-server-disk --size=600GB --type=pd-ssd --zone=us-central1-a
+
+      - name: Create Windows Server 2025 VM
+        run: |
+          gcloud compute instances create windows-server-vm \
+            --zone=us-central1-a \
+            --machine-type=$MACHINE_TYPE \
+            --disk=name=windows-server-disk,boot=yes,auto-delete=yes \
+            --image-family=windows-2025 \
+            --image-project=windows-cloud \
+            --metadata=windows-startup-script-cmd="powershell -Command \"Write-Host 'VM pornita'\"" \
+            --no-address
+
+      - name: Install Tailscale and reset RDPUser password
+        id: setup_vm
+        run: |
+          PASS=$(openssl rand -base64 12)
+          gcloud compute ssh windows-server-vm --zone=us-central1-a --command="powershell -Command `
+            Invoke-WebRequest https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi -OutFile C:\\tailscale.msi; `
+            Start-Process msiexec.exe -ArgumentList '/i', 'C:\\tailscale.msi', '/quiet', '/norestart' -Wait; `
+            Remove-Item C:\\tailscale.msi; `
+            & 'C:\\Program Files\\Tailscale\\tailscale.exe' up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-vm-$Env:GITHUB_RUN_ID; `
+            net user RDPUser $env:PASS /add /active:yes; `
+            net localgroup administrators RDPUser /add; `
+            Set-Content -Path C:\\pass.txt -Value $env:PASS" -- -o SendEnv=PASS
+          echo "::set-output name=password::$PASS"
+
+      - name: Show Tailscale IP and user credentials
+        run: |
+          IP=$(gcloud compute ssh windows-server-vm --zone=us-central1-a --command="& 'C:\\Program Files\\Tailscale\\tailscale.exe' ip -4 | Out-String")
+          echo "IP Tailscale: $IP"
+          echo "User: RDPUser"
+          echo "Password: ${{ steps.setup_vm.outputs.password }}"
+
+      - name: Keep VM alive for 6 hours
+        run: sleep 21600
+        
