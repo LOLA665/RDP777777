@@ -1,0 +1,66 @@
+name: Create VM with Tesla T4 + Tailscale + Keep Alive (WIF)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  create-vm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 370
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: 'projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_NAME/providers/PROVIDER_NAME'
+          service_account: 'SERVICE_ACCOUNT_EMAIL'
+
+      - uses: google-github-actions/setup-gcloud@v3
+        with:
+          version: latest
+
+      - run: |
+          gcloud config set project PROJECT_ID
+          gcloud config set compute/zone us-central1-a
+
+      - run: |
+          gcloud compute instances create windows-server-vm \
+            --machine-type=custom-8-32768 \
+            --accelerator="type=nvidia-tesla-t4,count=1" \
+            --image-family=windows-2025 \
+            --image-project=windows-cloud \
+            --boot-disk-size=500GB \
+            --boot-disk-type=pd-ssd \
+            --zone=us-central1-a \
+            --maintenance-policy=TERMINATE \
+            --restart-on-failure
+
+      - id: setup_vm
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          PASS=$(openssl rand -base64 16)
+          gcloud compute ssh windows-server-vm --zone=us-central1-a --command="powershell -Command `
+            Invoke-WebRequest https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi -OutFile C:\\tailscale.msi; `
+            Start-Process msiexec.exe -ArgumentList '/i', 'C:\\tailscale.msi', '/quiet', '/norestart' -Wait; `
+            Remove-Item C:\\tailscale.msi; `
+            & 'C:\\Program Files\\Tailscale\\tailscale.exe' up --authkey=$Env:TAILSCALE_AUTH_KEY --hostname=gh-vm-$Env:GITHUB_RUN_ID; `
+            net user AdminUser $Env:PASS /add /active:yes; `
+            net localgroup administrators AdminUser /add; `
+            Set-Content -Path C:\\pass.txt -Value $Env:PASS" -- -o SendEnv=TAILSCALE_AUTH_KEY -o SendEnv=PASS
+          echo "::set-output name=password::$PASS"
+
+      - run: |
+          IP=$(gcloud compute ssh windows-server-vm --zone=us-central1-a --command="& 'C:\\Program Files\\Tailscale\\tailscale.exe' ip -4")
+          echo "Tailscale IP: $IP"
+          echo "User: AdminUser"
+          echo "Password: ${{ steps.setup_vm.outputs.password }}"
+
+      - run: sleep 21600
+      
