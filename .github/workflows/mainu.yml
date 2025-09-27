@@ -1,0 +1,47 @@
+name: Workflow cu GPU Tesla T4, Intel CPU puternic, 16GB RAM, SSD 333GB
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gaming-vm:
+    runs-on: gpu-t4-4-core
+    timeout-minutes: 4320
+
+    steps:
+      - name: Verificare specificații hardware virtualizate
+        shell: pwsh
+        run: |
+          Write-Host "=== Verificare hardware runner ==="
+          # Informații sistem
+          Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, MaxClockSpeed
+          Get-CimInstance Win32_PhysicalMemory | Measure-Object -Property Capacity -Sum | ForEach-Object { Write-Host "RAM total (GB): $([math]::round($_.Sum / 1GB))" }
+          Get-CimInstance Win32_DiskDrive | Select-Object Model, Size | ForEach-Object { Write-Host "Disk Model: $($_.Model) - Size (GB): $([math]::round($_.Size / 1GB))" }
+          # GPU
+          Get-WmiObject Win32_VideoController | Select-Object Name, DriverVersion, VideoProcessor
+
+      - name: Simulare configurare RAM la 16 GB (doar afișare)
+        shell: pwsh
+        run: |
+          Write-Host "Simulăm configurarea la 16 GB RAM (runner are 28 GB disponibil)."
+
+      - name: Simulare SSD 333 GB (doar afișare)
+        shell: pwsh
+        run: |
+          Write-Host "Simulăm SSD de 333 GB (depinde de spațiul disponibil pe runner)."
+
+      - name: Afișare nvidia-smi (Tesla T4 GPU)
+        shell: pwsh
+        run: |
+          nvidia-smi
+
+      # Pași suplimentari de configurare gaming, software, remote desktop etc. pot fi adăugați aici
+
+      - name: Menține workflow activ pentru 3 zile (4320 minute)
+        shell: pwsh
+        run: |
+          for ($i=0; $i -lt 432; $i++) {
+            Write-Host ("Mențin conexiunea. Iterația {0} din 432 la {1}" -f $i, (Get-Date))
+            Start-Sleep -Seconds 600
+          }
+          
